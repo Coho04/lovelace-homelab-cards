@@ -16,3 +16,8 @@ jobs:
       - uses: hacs/action@main
         with:
           category: plugin
+          # "images" verlangt ein Bildschirmfoto im README. Das ist nur fuer die
+          # Aufnahme in den offiziellen HACS-Store noetig, nicht fuer ein
+          # benutzerdefiniertes Repository. Sobald ein echtes Bild der Karte
+          # vorliegt, kommt es ins README und diese Zeile faellt weg.
+          ignore: images
