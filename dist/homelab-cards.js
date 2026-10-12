@@ -6,7 +6,7 @@
  * ohne dass in Home Assistant eine zweite Ressource eingetragen werden muss.
  *
  * Enthalten:
- *   - entities-background-card
+ *   - entities-background-card  (+ visueller Editor)
  *
  * ---------------------------------------------------------------------------
  * entities-background-card
@@ -33,9 +33,13 @@
  *       secondary_info: area_name  # optional
  *       color: '#ff7043'           # optional, sonst aus der Palette
  *
+ *   color_targets: [icon, name]    # was die Farbe einfaerbt: icon | name | dot
+ *
  * Feinschliff: fill_opacity (0.13), line_opacity (0.55), line_width (2),
  * buckets (48 Punkte je Linie), scale (unit | each), refresh (Minuten).
  */
+
+const VERSION = "1.2.0";
 
 const PALETTE = [
   "#ff7043", "#29b6f6", "#90a4ae", "#ef5350",
@@ -46,6 +50,36 @@ const PALETTE = [
 const W = 1000;          // SVG-Koordinatenraum, per preserveAspectRatio gedehnt
 const H = 300;
 const GRAPH_MODI = ["card", "rows", "full", "none"];
+const FARB_ZIELE = ["icon", "name", "dot"];
+
+const STANDARD = {
+  hours: 24,
+  refresh: 5,
+  buckets: 48,
+  fill_opacity: 0.13,
+  line_opacity: 0.55,
+  line_width: 2,
+  scale: "unit",
+  color_targets: ["icon", "name"],
+};
+
+/** Laedt die Formularelemente des HA-Frontends nach, falls noch keine Karte sie gezogen hat. */
+async function ladeHaFormularElemente() {
+  if (customElements.get("ha-entity-picker") && customElements.get("ha-form")) return;
+  try {
+    const helpers = await window.loadCardHelpers();
+    const karte = await helpers.createCardElement({ type: "entities", entities: [] });
+    if (karte && karte.constructor.getConfigElement) {
+      await karte.constructor.getConfigElement();
+    }
+  } catch (err) {
+    console.warn("entities-background-card: HA-Formularelemente nicht ladbar", err);
+  }
+}
+
+/* =========================================================================
+ * Karte
+ * ========================================================================= */
 
 class EntitiesBackgroundCard extends HTMLElement {
   constructor() {
@@ -57,11 +91,27 @@ class EntitiesBackgroundCard extends HTMLElement {
     this._signatur = "";
   }
 
+  static async getConfigElement() {
+    await ladeHaFormularElemente();
+    return document.createElement("entities-background-card-editor");
+  }
+
+  static getStubConfig(hass, entities, entitiesFallback) {
+    const auswahl = (entities || []).filter((id) => id.startsWith("sensor."));
+    const liste = (auswahl.length ? auswahl : entitiesFallback || []).slice(0, 3);
+    return {
+      title: "Verläufe",
+      hours: 24,
+      footer: { graph: "card", height: 100 },
+      entities: liste.map((id, i) => ({ entity: id, color: PALETTE[i % PALETTE.length] })),
+    };
+  }
+
   /* ---------- Konfiguration ---------- */
 
   setConfig(config) {
-    if (!config || !Array.isArray(config.entities) || config.entities.length === 0) {
-      throw new Error("Mindestens eine Entitaet unter 'entities' angeben.");
+    if (!config || !Array.isArray(config.entities)) {
+      throw new Error("'entities' fehlt oder ist keine Liste.");
     }
 
     const footer = config.footer || {};
@@ -70,15 +120,22 @@ class EntitiesBackgroundCard extends HTMLElement {
       throw new Error(`footer.graph muss eines von ${GRAPH_MODI.join(", ")} sein.`);
     }
 
+    // Einfaerbungsziele: Einzelwert wie Liste akzeptieren, Unbekanntes verwerfen.
+    const zieleRoh = config.color_targets === undefined
+      ? STANDARD.color_targets
+      : [].concat(config.color_targets);
+    const ziele = zieleRoh.filter((z) => FARB_ZIELE.includes(z));
+    const unbekannt = zieleRoh.filter((z) => !FARB_ZIELE.includes(z));
+    if (unbekannt.length) {
+      throw new Error(
+        `color_targets kennt nur ${FARB_ZIELE.join(", ")} — unbekannt: ${unbekannt.join(", ")}`
+      );
+    }
+
     this._config = {
-      hours: 24,
-      refresh: 5,
-      buckets: 48,
-      fill_opacity: 0.13,
-      line_opacity: 0.55,
-      line_width: 2,
-      scale: "unit",
+      ...STANDARD,
       ...config,
+      color_targets: ziele,
       footer: { height: 100, ...footer, graph },
       entities: config.entities.map((e, i) => {
         const roh = typeof e === "string" ? { entity: e } : e;
@@ -118,10 +175,7 @@ class EntitiesBackgroundCard extends HTMLElement {
     this.shadowRoot.innerHTML = `
       <style>
         ha-card { position: relative; overflow: hidden; }
-        .hintergrund {
-          position: absolute; inset: 0;
-          z-index: 0; pointer-events: none;
-        }
+        .hintergrund { position: absolute; inset: 0; z-index: 0; pointer-events: none; }
         .hintergrund svg, .band svg, .zeile-graph svg {
           width: 100%; height: 100%; display: block;
         }
@@ -135,16 +189,13 @@ class EntitiesBackgroundCard extends HTMLElement {
           line-height: 1.2;
         }
         .zeilen { padding: 0 16px 12px; }
+        .leer { padding: 16px; color: var(--secondary-text-color); font-size: 14px; }
         .zeile {
-          position: relative;
-          display: flex;
-          align-items: center;
-          min-height: 40px;
-          cursor: pointer;
+          position: relative; display: flex; align-items: center;
+          min-height: 40px; cursor: pointer;
         }
         .zeile-graph {
-          position: absolute;
-          left: -16px; right: -16px; top: 0; bottom: 0;
+          position: absolute; left: -16px; right: -16px; top: 0; bottom: 0;
           z-index: 0; pointer-events: none;
         }
         .zeile-inhalt {
@@ -158,13 +209,16 @@ class EntitiesBackgroundCard extends HTMLElement {
           white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
         }
         .zusatz { font-size: 12px; line-height: 1.3; color: var(--secondary-text-color); }
+        .punkt {
+          flex: 0 0 auto; width: 8px; height: 8px;
+          border-radius: 50%; margin-left: 8px;
+        }
         .wert {
           flex: 0 0 auto; margin-left: 8px; text-align: right;
           font-size: 14px; color: var(--primary-text-color); white-space: nowrap;
         }
         .band { position: relative; width: 100%; }
         .bild { display: block; width: 100%; }
-        .fehler { padding: 12px 16px; color: var(--error-color, #db4437); font-size: 13px; }
       </style>
       <ha-card>
         <div class="hintergrund"></div>
@@ -202,15 +256,20 @@ class EntitiesBackgroundCard extends HTMLElement {
     this._elTitel.textContent = cfg.title || "";
     this._elTitel.style.display = cfg.title ? "" : "none";
 
-    // Zeilen nur dann neu bauen, wenn sich die Zusammensetzung wirklich geaendert hat.
-    const signatur = cfg.entities.map((e) => `${e.entity}|${e.name || ""}|${e.color || ""}`).join(";");
-    if (signatur !== this._signatur) {
-      this._elZeilen.innerHTML = "";
-      cfg.entities.forEach((e) => this._elZeilen.appendChild(this._baueZeile(e)));
-      this._signatur = signatur;
+    if (cfg.entities.length === 0) {
+      this._elZeilen.innerHTML = '<div class="leer">Noch keine Entität ausgewählt.</div>';
+      this._signatur = "";
+    } else {
+      // Zeilen nur dann neu bauen, wenn sich die Zusammensetzung wirklich geaendert hat.
+      const signatur = cfg.color_targets.join(",") + "::" +
+        cfg.entities.map((e) => `${e.entity}|${e.name || ""}|${e.color || ""}`).join(";");
+      if (signatur !== this._signatur) {
+        this._elZeilen.innerHTML = "";
+        cfg.entities.forEach((e) => this._elZeilen.appendChild(this._baueZeile(e)));
+        this._signatur = signatur;
+      }
+      cfg.entities.forEach((e, i) => this._aktualisiereZeile(this._elZeilen.children[i], e));
     }
-
-    cfg.entities.forEach((e, i) => this._aktualisiereZeile(this._elZeilen.children[i], e));
 
     this._zeichneBild();
     this._zeichneGraph();
@@ -229,9 +288,11 @@ class EntitiesBackgroundCard extends HTMLElement {
     const inhalt = document.createElement("div");
     inhalt.className = "zeile-inhalt";
 
+    const ziele = this._config.color_targets;
+
     const icon = document.createElement("ha-icon");
     icon.icon = e.icon || (st && st.attributes.icon) || this._standardIcon(st);
-    if (e.color) icon.style.color = e.color;
+    if (e.color && ziele.includes("icon")) icon.style.color = e.color;
     inhalt.appendChild(icon);
 
     const text = document.createElement("div");
@@ -239,12 +300,19 @@ class EntitiesBackgroundCard extends HTMLElement {
     const name = document.createElement("div");
     name.className = "name";
     name.textContent = e.name || (st ? st.attributes.friendly_name : e.entity);
-    if (e.color) name.style.color = e.color;   // die Farbe an der Zeile ersetzt die Legende
+    if (e.color && ziele.includes("name")) name.style.color = e.color;
     const zusatz = document.createElement("div");
     zusatz.className = "zusatz";
     text.appendChild(name);
     text.appendChild(zusatz);
     inhalt.appendChild(text);
+
+    if (e.color && ziele.includes("dot")) {
+      const punkt = document.createElement("span");
+      punkt.className = "punkt";
+      punkt.style.background = e.color;
+      inhalt.appendChild(punkt);
+    }
 
     const wert = document.createElement("div");
     wert.className = "wert";
@@ -269,7 +337,7 @@ class EntitiesBackgroundCard extends HTMLElement {
 
     if (!st) {
       wert.textContent = "—";
-      wert.title = "Entitaet nicht gefunden";
+      wert.title = "Entität nicht gefunden";
       return;
     }
     const einheit = st.attributes.unit_of_measurement || "";
@@ -339,7 +407,7 @@ class EntitiesBackgroundCard extends HTMLElement {
   /* ---------- Verlauf ---------- */
 
   async _holeVerlaufWennNoetig() {
-    if (this._laeuft) return;
+    if (this._laeuft || this._config.entities.length === 0) return;
     if (Date.now() - this._geholt < this._config.refresh * 60000) return;
     this._laeuft = true;
     try {
@@ -421,7 +489,7 @@ class EntitiesBackgroundCard extends HTMLElement {
         const zeile = this._elZeilen.children[i];
         if (!zeile || r.punkte.length < 2) return;
         const ziel = zeile.querySelector(".zeile-graph");
-        ziel.innerHTML = this._svg([this._pfad(r, this._skala([r]))], `r${i}`);
+        if (ziel) ziel.innerHTML = this._svg([this._pfad(r, this._skala([r]))], `r${i}`);
       });
       return;
     }
@@ -511,11 +579,453 @@ class EntitiesBackgroundCard extends HTMLElement {
   }
 }
 
+/* =========================================================================
+ * Visueller Editor
+ * ========================================================================= */
+
+const ZUSATZ_OPTIONEN = [
+  { value: "", label: "keine" },
+  { value: "area_name", label: "Bereich" },
+  { value: "last-changed", label: "Zuletzt geändert" },
+];
+
+const BESCHRIFTUNG = {
+  title: "Überschrift",
+  hours: "Zeitraum",
+  graph: "Graph",
+  height: "Höhe des Graphbands",
+  image: "Bild im Footer",
+  image_height: "Bildhöhe",
+  color_targets: "Was wird eingefärbt",
+  scale: "Skalierung",
+  fill_opacity: "Deckkraft der Fläche",
+  line_opacity: "Deckkraft der Linie",
+  line_width: "Linienstärke",
+  buckets: "Punkte je Linie",
+  refresh: "Aktualisierung",
+};
+
+class EntitiesBackgroundCardEditor extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: "open" });
+    this._aufgebaut = false;
+  }
+
+  setConfig(config) {
+    this._config = {
+      ...config,
+      footer: { ...(config.footer || {}) },
+      entities: (config.entities || []).map((e) =>
+        typeof e === "string" ? { entity: e } : { ...e }
+      ),
+    };
+    this._rendere();
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    this._rendere();
+  }
+
+  /* ---------- Geruest ---------- */
+
+  _baueGeruest() {
+    this.shadowRoot.innerHTML = `
+      <style>
+        .wrap { display: flex; flex-direction: column; gap: 16px; }
+        .abschnitt {
+          font-weight: 500; font-size: 15px;
+          color: var(--primary-text-color);
+          margin-bottom: -8px;
+        }
+        .hinweis { font-size: 12px; color: var(--secondary-text-color); margin-top: -8px; }
+        .eintrag {
+          border: 1px solid var(--divider-color);
+          border-radius: 8px;
+          padding: 8px 8px 12px;
+          display: flex; flex-direction: column; gap: 8px;
+        }
+        .kopf { display: flex; align-items: center; gap: 4px; }
+        .kopf ha-entity-picker, .kopf .ersatz { flex: 1 1 auto; }
+        .detail { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+        .detail ha-textfield, .detail .ersatz { flex: 1 1 140px; }
+        .farbe { display: flex; align-items: center; gap: 4px; }
+        .farbe label { font-size: 12px; color: var(--secondary-text-color); }
+        input[type="color"] {
+          width: 36px; height: 32px; padding: 0; border: none;
+          background: none; cursor: pointer;
+        }
+        select, .ersatz {
+          font: inherit; font-size: 14px; padding: 8px;
+          color: var(--primary-text-color);
+          background: var(--card-background-color, #fff);
+          border: 1px solid var(--divider-color);
+          border-radius: 4px;
+        }
+        .feldlabel { font-size: 12px; color: var(--secondary-text-color); display: block; }
+        .knopf {
+          background: none; border: none; cursor: pointer;
+          color: var(--secondary-text-color); font-size: 18px;
+          width: 32px; height: 32px; border-radius: 50%;
+        }
+        .knopf:hover { background: var(--divider-color); }
+        .knopf[disabled] { opacity: 0.3; cursor: default; }
+        .hinzu { display: flex; flex-direction: column; gap: 4px; }
+      </style>
+      <div class="wrap">
+        <ha-form class="allgemein"></ha-form>
+        <div class="abschnitt">Entitäten</div>
+        <div class="hinweis"></div>
+        <div class="liste"></div>
+        <div class="hinzu">
+          <span class="feldlabel">Entität hinzufügen</span>
+          <div class="hinzu-ziel"></div>
+        </div>
+      </div>
+    `;
+    this._elForm = this.shadowRoot.querySelector(".allgemein");
+    this._elHinweis = this.shadowRoot.querySelector(".hinweis");
+    this._elListe = this.shadowRoot.querySelector(".liste");
+    this._elHinzu = this.shadowRoot.querySelector(".hinzu-ziel");
+
+    this._elForm.computeLabel = (schema) => BESCHRIFTUNG[schema.name] || schema.name;
+    this._elForm.addEventListener("value-changed", (ev) => {
+      ev.stopPropagation();
+      this._ausFormular(ev.detail.value);
+    });
+
+    this._aufgebaut = true;
+  }
+
+  /* ---------- Schema ---------- */
+
+  _schema() {
+    const graph = this._config.footer.graph || "none";
+    const felder = [
+      { name: "title", selector: { text: {} } },
+      {
+        name: "graph",
+        selector: {
+          select: {
+            mode: "dropdown",
+            options: [
+              { value: "none", label: "Kein Graph" },
+              { value: "card", label: "Band am Kartenfuß" },
+              { value: "rows", label: "Hinter jeder Zeile" },
+              { value: "full", label: "Hinter der ganzen Karte" },
+            ],
+          },
+        },
+      },
+    ];
+
+    if (graph !== "none") {
+      felder.push({
+        name: "color_targets",
+        selector: {
+          select: {
+            multiple: true,
+            mode: "list",
+            options: [
+              { value: "icon", label: "Icon" },
+              { value: "name", label: "Name" },
+              { value: "dot", label: "Punkt vor dem Wert" },
+            ],
+          },
+        },
+      });
+      felder.push({
+        name: "hours",
+        selector: { number: { min: 1, max: 720, mode: "box", unit_of_measurement: "h" } },
+      });
+    }
+    if (graph === "card") {
+      felder.push({
+        name: "height",
+        selector: { number: { min: 40, max: 400, mode: "box", unit_of_measurement: "px" } },
+      });
+    }
+
+    felder.push({ name: "image", selector: { text: {} } });
+    if (this._config.footer.image) {
+      felder.push({
+        name: "image_height",
+        selector: { number: { min: 40, max: 600, mode: "box", unit_of_measurement: "px" } },
+      });
+    }
+
+    if (graph !== "none") {
+      felder.push({
+        type: "expandable",
+        name: "",
+        title: "Feinschliff",
+        icon: "mdi:tune",
+        schema: [
+          {
+            name: "scale",
+            selector: {
+              select: {
+                mode: "dropdown",
+                options: [
+                  { value: "unit", label: "Gleiche Einheit teilt sich eine Skala" },
+                  { value: "each", label: "Jede Linie über die volle Höhe" },
+                ],
+              },
+            },
+          },
+          { name: "fill_opacity", selector: { number: { min: 0, max: 1, step: 0.01, mode: "slider" } } },
+          { name: "line_opacity", selector: { number: { min: 0, max: 1, step: 0.01, mode: "slider" } } },
+          { name: "line_width", selector: { number: { min: 1, max: 6, step: 0.5, mode: "slider" } } },
+          { name: "buckets", selector: { number: { min: 8, max: 200, mode: "box" } } },
+          { name: "refresh", selector: { number: { min: 1, max: 120, mode: "box", unit_of_measurement: "min" } } },
+        ],
+      });
+    }
+
+    return felder;
+  }
+
+  _formularDaten() {
+    const c = this._config, f = c.footer || {};
+    return {
+      title: c.title || "",
+      graph: f.graph || "none",
+      hours: c.hours ?? STANDARD.hours,
+      height: f.height ?? 100,
+      image: f.image || "",
+      image_height: f.image_height,
+      color_targets: c.color_targets ?? STANDARD.color_targets,
+      scale: c.scale ?? STANDARD.scale,
+      fill_opacity: c.fill_opacity ?? STANDARD.fill_opacity,
+      line_opacity: c.line_opacity ?? STANDARD.line_opacity,
+      line_width: c.line_width ?? STANDARD.line_width,
+      buckets: c.buckets ?? STANDARD.buckets,
+      refresh: c.refresh ?? STANDARD.refresh,
+    };
+  }
+
+  /** Formularwerte zurueck in eine schlanke Konfiguration — Standardwerte landen nicht im YAML. */
+  _ausFormular(daten) {
+    const neu = { type: "custom:entities-background-card" };
+    if (daten.title) neu.title = daten.title;
+
+    const footer = {};
+    if (daten.graph && daten.graph !== "none") footer.graph = daten.graph;
+    if (daten.graph === "card" && daten.height && daten.height !== 100) footer.height = daten.height;
+    if (daten.image) footer.image = daten.image;
+    if (daten.image && daten.image_height) footer.image_height = daten.image_height;
+    if (Object.keys(footer).length) neu.footer = footer;
+
+    if (daten.graph && daten.graph !== "none") {
+      if (daten.hours && daten.hours !== STANDARD.hours) neu.hours = daten.hours;
+      const ziele = Array.isArray(daten.color_targets) ? daten.color_targets : [];
+      const standardZiele = [...STANDARD.color_targets].sort().join(",");
+      if ([...ziele].sort().join(",") !== standardZiele) neu.color_targets = ziele;
+      ["scale", "fill_opacity", "line_opacity", "line_width", "buckets", "refresh"].forEach((k) => {
+        if (daten[k] !== undefined && daten[k] !== STANDARD[k]) neu[k] = daten[k];
+      });
+    }
+
+    neu.entities = this._config.entities;
+    this._melde(neu);
+  }
+
+  /* ---------- Entitaetsliste ---------- */
+
+  _rendere() {
+    if (!this._config || !this._hass) return;
+    if (!this._aufgebaut) this._baueGeruest();
+
+    this._elForm.hass = this._hass;
+    this._elForm.schema = this._schema();
+    this._elForm.data = this._formularDaten();
+
+    const mitGraph = (this._config.footer.graph || "none") !== "none";
+    this._elHinweis.textContent = mitGraph
+      ? "Jede Zeile trägt die Farbe ihrer Linie — deshalb braucht die Karte keine Legende."
+      : "Ohne Graph bleiben die Zeilen im Theme-Stil; eine Farbe würde dort nichts erklären.";
+
+    this._elListe.innerHTML = "";
+    this._config.entities.forEach((e, i) => this._elListe.appendChild(this._baueEintrag(e, i)));
+
+    this._elHinzu.innerHTML = "";
+    this._elHinzu.appendChild(this._entitaetsWaehler("", (wert) => {
+      if (!wert) return;
+      const entities = [...this._config.entities, {
+        entity: wert,
+        color: PALETTE[this._config.entities.length % PALETTE.length],
+      }];
+      this._melde({ ...this._config, entities });
+    }));
+  }
+
+  _baueEintrag(e, index) {
+    const box = document.createElement("div");
+    box.className = "eintrag";
+
+    // Kopfzeile: Entitaet plus Reihenfolge und Loeschen
+    const kopf = document.createElement("div");
+    kopf.className = "kopf";
+    kopf.appendChild(this._entitaetsWaehler(e.entity, (wert) => {
+      if (!wert) return this._aendere(index, null);
+      this._aendere(index, { ...e, entity: wert });
+    }));
+    kopf.appendChild(this._knopf("▲", index === 0, () => this._verschiebe(index, -1)));
+    kopf.appendChild(this._knopf("▼", index === this._config.entities.length - 1, () => this._verschiebe(index, 1)));
+    kopf.appendChild(this._knopf("✕", false, () => this._aendere(index, null)));
+    box.appendChild(kopf);
+
+    // Detailzeile: Name, Sekundaerinfo, Farbe
+    const detail = document.createElement("div");
+    detail.className = "detail";
+
+    detail.appendChild(this._textfeld("Name (optional)", e.name || "", (wert) => {
+      const neu = { ...e };
+      if (wert) neu.name = wert; else delete neu.name;
+      this._aendere(index, neu);
+    }));
+
+    const auswahl = document.createElement("select");
+    ZUSATZ_OPTIONEN.forEach((o) => {
+      const opt = document.createElement("option");
+      opt.value = o.value;
+      opt.textContent = o.label;
+      if ((e.secondary_info || "") === o.value) opt.selected = true;
+      auswahl.appendChild(opt);
+    });
+    auswahl.title = "Zweite Zeile unter dem Namen";
+    auswahl.addEventListener("change", () => {
+      const neu = { ...e };
+      if (auswahl.value) neu.secondary_info = auswahl.value; else delete neu.secondary_info;
+      this._aendere(index, neu);
+    });
+    detail.appendChild(auswahl);
+
+    const farbe = document.createElement("div");
+    farbe.className = "farbe";
+    const label = document.createElement("label");
+    label.textContent = "Farbe";
+    const picker = document.createElement("input");
+    picker.type = "color";
+    picker.value = e.color || PALETTE[index % PALETTE.length];
+    picker.addEventListener("change", () => this._aendere(index, { ...e, color: picker.value }));
+    farbe.appendChild(label);
+    farbe.appendChild(picker);
+    detail.appendChild(farbe);
+
+    box.appendChild(detail);
+    return box;
+  }
+
+  /** ha-entity-picker, wenn das Frontend ihn hergibt — sonst ein Feld mit Vorschlagsliste. */
+  _entitaetsWaehler(wert, beiAenderung) {
+    if (customElements.get("ha-entity-picker")) {
+      const p = document.createElement("ha-entity-picker");
+      p.hass = this._hass;
+      p.value = wert;
+      p.allowCustomEntity = true;
+      p.addEventListener("value-changed", (ev) => {
+        ev.stopPropagation();
+        beiAenderung(ev.detail.value);
+      });
+      return p;
+    }
+
+    const feld = document.createElement("input");
+    feld.className = "ersatz";
+    feld.value = wert;
+    feld.placeholder = "sensor.beispiel";
+    const liste = document.createElement("datalist");
+    liste.id = `ebg-liste-${Math.random().toString(36).slice(2)}`;
+    Object.keys(this._hass.states).slice(0, 2000).forEach((id) => {
+      const o = document.createElement("option");
+      o.value = id;
+      liste.appendChild(o);
+    });
+    feld.setAttribute("list", liste.id);
+    feld.addEventListener("change", () => beiAenderung(feld.value.trim()));
+
+    const huelle = document.createElement("span");
+    huelle.style.display = "contents";
+    huelle.appendChild(feld);
+    huelle.appendChild(liste);
+    return huelle;
+  }
+
+  _textfeld(label, wert, beiAenderung) {
+    if (customElements.get("ha-textfield")) {
+      const f = document.createElement("ha-textfield");
+      f.label = label;
+      f.value = wert;
+      f.addEventListener("change", () => beiAenderung(f.value.trim()));
+      return f;
+    }
+    const f = document.createElement("input");
+    f.className = "ersatz";
+    f.placeholder = label;
+    f.value = wert;
+    f.addEventListener("change", () => beiAenderung(f.value.trim()));
+    return f;
+  }
+
+  _knopf(zeichen, gesperrt, beiKlick) {
+    const b = document.createElement("button");
+    b.className = "knopf";
+    b.type = "button";
+    b.textContent = zeichen;
+    b.disabled = !!gesperrt;
+    b.addEventListener("click", beiKlick);
+    return b;
+  }
+
+  _aendere(index, eintrag) {
+    const entities = [...this._config.entities];
+    if (eintrag === null) entities.splice(index, 1);
+    else entities[index] = eintrag;
+    this._melde({ ...this._config, entities });
+  }
+
+  _verschiebe(index, richtung) {
+    const ziel = index + richtung;
+    const entities = [...this._config.entities];
+    if (ziel < 0 || ziel >= entities.length) return;
+    [entities[index], entities[ziel]] = [entities[ziel], entities[index]];
+    this._melde({ ...this._config, entities });
+  }
+
+  _melde(config) {
+    const sauber = { ...config };
+    delete sauber.footer;
+    if (config.footer && Object.keys(config.footer).length) {
+      const f = { ...config.footer };
+      if (f.graph === "none") delete f.graph;
+      if (Object.keys(f).length) sauber.footer = f;
+    }
+    this.dispatchEvent(new CustomEvent("config-changed", {
+      detail: { config: sauber },
+      bubbles: true,
+      composed: true,
+    }));
+  }
+}
+
+/* ========================================================================= */
+
 customElements.define("entities-background-card", EntitiesBackgroundCard);
+customElements.define("entities-background-card-editor", EntitiesBackgroundCardEditor);
 
 window.customCards = window.customCards || [];
 window.customCards.push({
   type: "entities-background-card",
   name: "Entities mit Hintergrundgraph",
-  description: "Entities-Liste mit Ueberschrift und Footer aus Bild und/oder Verlaufsgraph.",
+  description: "Entities-Liste mit Überschrift und Footer aus Bild und/oder Verlaufsgraph.",
+  preview: true,
+  documentationURL: "https://github.com/Coho04/lovelace-homelab-cards",
 });
+
+console.info(
+  `%c HOMELAB-CARDS %c v${VERSION} `,
+  "color: white; background: #ff7043; font-weight: 700;",
+  "color: #ff7043; background: white; font-weight: 700;"
+);

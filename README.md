@@ -32,6 +32,10 @@ braucht die Karte **keine Legende**: die Zuordnung Zeile ↔ Linie sitzt an der 
 Sie ersetzt den eingebauten `footer: {type: graph}` einer `entities`-Karte, der
 konstruktiv nur **eine** Entität zeichnen kann.
 
+Die Karte bringt einen **visuellen Editor** mit — Entitäten per Auswahlfeld hinzufügen,
+sortieren und löschen, Farbe per Farbwähler, alles Übrige über Auswahl- und Schieberegler.
+Der YAML-Editor bleibt natürlich weiter nutzbar.
+
 ```yaml
 type: custom:entities-background-card
 title: Temperaturen
@@ -67,6 +71,7 @@ entities:
 | `entities` | – | Liste, beliebig lang. Je Eintrag `entity`, optional `name`, `icon`, `color`, `secondary_info` (`area_name` oder `last-changed`) |
 | `hours` | `24` | Zeitraum des Verlaufs |
 | `footer.graph` | `none` | siehe Tabelle oben |
+| `color_targets` | `[icon, name]` | was die Farbe einfärbt: beliebige Kombination aus `icon`, `name` und `dot` (farbiger Punkt vor dem Wert). Leere Liste = gar nichts |
 | `footer.height` | `100` | Höhe des Graphbands in Pixeln, nur bei `graph: card` |
 | `footer.image` | – | Bild im Footer, z. B. `/local/grundriss.png`. Auch zusammen mit einem Graphen |
 | `footer.image_height` | – | Bildhöhe in Pixeln; ohne Angabe bleibt das Originalverhältnis |
@@ -79,6 +84,22 @@ entities:
 
 Ohne `color` vergibt die Karte Farben aus einer festen Palette — aber nur, wenn ein Graph
 aktiv ist. Ohne Graph erklärt eine Farbe nichts, dann bleiben die Zeilen im Theme-Stil.
+
+#### Einfärbung
+
+Welche Teile einer Zeile die Linienfarbe tragen, bestimmt `color_targets`:
+
+```yaml
+color_targets: [icon]          # nur das Icon
+color_targets: [name]          # nur der Name
+color_targets: [icon, name]    # beides (Standard)
+color_targets: [dot]           # farbiger Punkt vor dem Wert
+color_targets: [icon, dot]     # Kombinationen sind erlaubt
+color_targets: []              # nichts einfärben
+```
+
+Ohne Graph greift die Einfärbung nicht — dann vergibt die Karte auch keine Farben,
+weil eine Farbe ohne zugehörige Linie nichts erklärt.
 
 #### Mehrere Einheiten
 
