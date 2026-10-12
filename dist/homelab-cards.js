@@ -39,7 +39,7 @@
  * buckets (48 Punkte je Linie), scale (unit | each), refresh (Minuten).
  */
 
-const VERSION = "1.2.0";
+const VERSION = "1.2.1";
 
 const PALETTE = [
   "#ff7043", "#29b6f6", "#90a4ae", "#ef5350",
@@ -610,22 +610,43 @@ class EntitiesBackgroundCardEditor extends HTMLElement {
     super();
     this.attachShadow({ mode: "open" });
     this._aufgebaut = false;
+    this._zeilen = [];           // { id, element, picker, nameFeld, auswahl, farbe, hoch, runter }
+    this._signatur = null;       // Zusammensetzung der Liste
+    this._schemaSignatur = null; // Eingaben, von denen das ha-form-Schema abhaengt
+    this._eigeneMeldung = null;  // JSON der zuletzt selbst gemeldeten Konfiguration
+    this._naechsteId = 1;
   }
 
   setConfig(config) {
-    this._config = {
-      ...config,
-      footer: { ...(config.footer || {}) },
-      entities: (config.entities || []).map((e) =>
-        typeof e === "string" ? { entity: e } : { ...e }
-      ),
-    };
-    this._rendere();
+    const normalisiert = this._normalisiere(config);
+    // Home Assistant spiegelt jede eigene Meldung sofort zurueck. Wuerde die einen
+    // Neuaufbau ausloesen, verlaere jeder Tastendruck den Fokus.
+    const eigenerRuecklauf =
+      this._eigeneMeldung && JSON.stringify(normalisiert) === this._eigeneMeldung;
+    this._eigeneMeldung = null;
+    this._config = normalisiert;
+    if (eigenerRuecklauf) return;
+    this._aktualisiere();
   }
 
   set hass(hass) {
+    const erstmals = !this._hass;
     this._hass = hass;
-    this._rendere();
+    if (!this._config) return;
+    // hass wechselt bei jeder Zustandsaenderung im Haus, also mehrmals pro Sekunde.
+    // Hier darf nichts neu gebaut werden - nur durchreichen.
+    if (erstmals) this._aktualisiere();
+    else this._reicheHassDurch();
+  }
+
+  _normalisiere(config) {
+    return {
+      ...config,
+      footer: { ...((config && config.footer) || {}) },
+      entities: ((config && config.entities) || []).map((e) =>
+        typeof e === "string" ? { entity: e } : { ...e }
+      ),
+    };
   }
 
   /* ---------- Geruest ---------- */
@@ -695,10 +716,287 @@ class EntitiesBackgroundCardEditor extends HTMLElement {
       this._ausFormular(ev.detail.value);
     });
 
+    // Der Hinzufuegen-Waehler wird einmal gebaut und danach nur geleert.
+    this._hinzuPicker = this._entitaetsWaehler("", (wert) => {
+      if (!wert) return;
+      const entities = [...this._config.entities, {
+        entity: wert,
+        color: PALETTE[this._config.entities.length % PALETTE.length],
+      }];
+      this._setzeWaehlerWert(this._hinzuPicker, "");
+      this._melde({ ...this._config, entities });
+    });
+    this._elHinzu.appendChild(this._hinzuPicker);
+
     this._aufgebaut = true;
   }
 
-  /* ---------- Schema ---------- */
+  /* ---------- Aktualisieren ---------- */
+
+  _aktualisiere() {
+    if (!this._config || !this._hass) return;
+    if (!this._aufgebaut) this._baueGeruest();
+
+    this._aktualisiereFormular();
+
+    const mitGraph = (this._config.footer.graph || "none") !== "none";
+    this._elHinweis.textContent = mitGraph
+      ? "Jede Zeile trägt die Farbe ihrer Linie — deshalb braucht die Karte keine Legende."
+      : "Ohne Graph bleiben die Zeilen im Theme-Stil; eine Farbe würde dort nichts erklären.";
+
+    // Nur neu bauen, wenn sich Zusammensetzung oder Reihenfolge geaendert haben.
+    const signatur = this._config.entities.map((e) => e.entity).join(";");
+    if (signatur !== this._signatur) {
+      this._baueListe();
+      this._signatur = signatur;
+    } else {
+      this._aktualisiereListe();
+    }
+  }
+
+  _aktualisiereFormular() {
+    const f = this._config.footer;
+    // Ein neues Schema-Array laesst ha-form alle Felder neu rendern. Also nur dann,
+    // wenn sich tatsaechlich etwas an den Eingaben des Schemas geaendert hat.
+    const signatur = `${f.graph || "none"}|${f.image ? 1 : 0}`;
+    if (signatur !== this._schemaSignatur) {
+      this._elForm.schema = this._schema();
+      this._schemaSignatur = signatur;
+    }
+    this._elForm.hass = this._hass;
+    this._elForm.data = this._formularDaten();
+  }
+
+  _reicheHassDurch() {
+    if (this._elForm) this._elForm.hass = this._hass;
+    this._zeilen.forEach((z) => {
+      if (z.picker && "hass" in z.picker) z.picker.hass = this._hass;
+    });
+    if (this._hinzuPicker && "hass" in this._hinzuPicker) this._hinzuPicker.hass = this._hass;
+  }
+
+  /* ---------- Entitaetsliste ---------- */
+
+  _baueListe() {
+    this._elListe.innerHTML = "";
+    this._zeilen = [];
+    this._config.entities.forEach((e, i) => {
+      const zeile = this._baueEintrag(e, this._naechsteId++, i);
+      this._zeilen.push(zeile);
+      this._elListe.appendChild(zeile.element);
+    });
+    this._aktualisiereKnoepfe();
+  }
+
+  /** Werte in vorhandene Felder schreiben, ohne das gerade benutzte anzufassen. */
+  _aktualisiereListe() {
+    this._zeilen.forEach((z, i) => {
+      const e = this._config.entities[i];
+      if (!e) return;
+      if (z.picker && !this._hatFokus(z.picker)) this._setzeWaehlerWert(z.picker, e.entity);
+      if (z.nameFeld && !this._hatFokus(z.nameFeld)) z.nameFeld.value = e.name || "";
+      if (z.auswahl && !this._hatFokus(z.auswahl)) z.auswahl.value = e.secondary_info || "";
+      if (z.farbe && !this._hatFokus(z.farbe)) {
+        z.farbe.value = this._alsHex(e.color, PALETTE[i % PALETTE.length]);
+      }
+    });
+    this._aktualisiereKnoepfe();
+  }
+
+  _aktualisiereKnoepfe() {
+    const letzter = this._zeilen.length - 1;
+    this._zeilen.forEach((z, i) => {
+      if (z.hoch) z.hoch.disabled = i === 0;
+      if (z.runter) z.runter.disabled = i === letzter;
+    });
+  }
+
+  /** input[type=color] kennt nur #rrggbb. Alles andere wuerde dort zu Schwarz. */
+  _alsHex(farbe, ersatz) {
+    return /^#[0-9a-f]{6}$/i.test(farbe || "") ? farbe : ersatz;
+  }
+
+  _hatFokus(el) {
+    const a = this.shadowRoot.activeElement;
+    return !!a && (a === el || el.contains(a));
+  }
+
+  _indexVon(id) {
+    return this._zeilen.findIndex((z) => z.id === id);
+  }
+
+  _baueEintrag(e, id, index) {
+    const box = document.createElement("div");
+    box.className = "eintrag";
+
+    // Kopfzeile: Entitaet plus Reihenfolge und Loeschen
+    const kopf = document.createElement("div");
+    kopf.className = "kopf";
+
+    const picker = this._entitaetsWaehler(e.entity, (wert) => {
+      const i = this._indexVon(id);
+      if (i < 0) return;
+      const jetzt = this._config.entities[i];
+      // Ein leerer Wert kommt auch beim Neuaufbau des Waehlers. Er darf die Zeile
+      // nicht loeschen - dafuer gibt es ausschliesslich das Kreuz.
+      if (!wert || wert === jetzt.entity) return;
+      this._aendere(i, { ...jetzt, entity: wert });
+    });
+    kopf.appendChild(picker);
+
+    const hoch = this._knopf("▲", false, () => {
+      const i = this._indexVon(id);
+      if (i >= 0) this._verschiebe(i, -1);
+    });
+    const runter = this._knopf("▼", false, () => {
+      const i = this._indexVon(id);
+      if (i >= 0) this._verschiebe(i, 1);
+    });
+    const weg = this._knopf("✕", false, () => {
+      const i = this._indexVon(id);
+      if (i >= 0) this._aendere(i, null);
+    });
+    kopf.appendChild(hoch);
+    kopf.appendChild(runter);
+    kopf.appendChild(weg);
+    box.appendChild(kopf);
+
+    // Detailzeile: Name, Sekundaerinfo, Farbe
+    const detail = document.createElement("div");
+    detail.className = "detail";
+
+    const nameFeld = this._textfeld("Name (optional)", e.name || "", (wert) => {
+      const i = this._indexVon(id);
+      if (i < 0) return;
+      const jetzt = this._config.entities[i];
+      if ((jetzt.name || "") === wert) return;
+      const neu = { ...jetzt };
+      if (wert) neu.name = wert; else delete neu.name;
+      this._aendere(i, neu);
+    });
+    detail.appendChild(nameFeld);
+
+    const auswahl = document.createElement("select");
+    ZUSATZ_OPTIONEN.forEach((o) => {
+      const opt = document.createElement("option");
+      opt.value = o.value;
+      opt.textContent = o.label;
+      if ((e.secondary_info || "") === o.value) opt.selected = true;
+      auswahl.appendChild(opt);
+    });
+    auswahl.title = "Zweite Zeile unter dem Namen";
+    auswahl.addEventListener("change", () => {
+      const i = this._indexVon(id);
+      if (i < 0) return;
+      const neu = { ...this._config.entities[i] };
+      if (auswahl.value) neu.secondary_info = auswahl.value; else delete neu.secondary_info;
+      this._aendere(i, neu);
+    });
+    detail.appendChild(auswahl);
+
+    const farbeBox = document.createElement("div");
+    farbeBox.className = "farbe";
+    const label = document.createElement("label");
+    label.textContent = "Farbe";
+    const farbe = document.createElement("input");
+    farbe.type = "color";
+    farbe.value = this._alsHex(e.color, PALETTE[index % PALETTE.length]);
+    farbe.addEventListener("change", () => {
+      const i = this._indexVon(id);
+      if (i < 0) return;
+      this._aendere(i, { ...this._config.entities[i], color: farbe.value });
+    });
+    farbeBox.appendChild(label);
+    farbeBox.appendChild(farbe);
+    detail.appendChild(farbeBox);
+
+    box.appendChild(detail);
+    return { id, element: box, picker, nameFeld, auswahl, farbe, hoch, runter };
+  }
+
+  /** ha-entity-picker, wenn das Frontend ihn hergibt — sonst ein Feld mit Vorschlagsliste. */
+  _entitaetsWaehler(wert, beiAenderung) {
+    if (customElements.get("ha-entity-picker")) {
+      const p = document.createElement("ha-entity-picker");
+      p.hass = this._hass;
+      p.value = wert;
+      p.allowCustomEntity = true;
+      p.addEventListener("value-changed", (ev) => {
+        ev.stopPropagation();
+        beiAenderung(ev.detail.value);
+      });
+      return p;
+    }
+
+    const huelle = document.createElement("span");
+    huelle.style.display = "contents";
+    const feld = document.createElement("input");
+    feld.className = "ersatz";
+    feld.value = wert;
+    feld.placeholder = "sensor.beispiel";
+    const liste = document.createElement("datalist");
+    liste.id = `ebg-liste-${Math.random().toString(36).slice(2)}`;
+    Object.keys(this._hass.states).slice(0, 2000).forEach((id) => {
+      const o = document.createElement("option");
+      o.value = id;
+      liste.appendChild(o);
+    });
+    feld.setAttribute("list", liste.id);
+    feld.addEventListener("change", () => beiAenderung(feld.value.trim()));
+    huelle.appendChild(feld);
+    huelle.appendChild(liste);
+    huelle._feld = feld;
+    return huelle;
+  }
+
+  _setzeWaehlerWert(waehler, wert) {
+    if (!waehler) return;
+    const ziel = waehler._feld || waehler;
+    if (ziel.value !== wert) ziel.value = wert;
+  }
+
+  _textfeld(label, wert, beiAenderung) {
+    if (customElements.get("ha-textfield")) {
+      const f = document.createElement("ha-textfield");
+      f.label = label;
+      f.value = wert;
+      f.addEventListener("change", () => beiAenderung(f.value.trim()));
+      return f;
+    }
+    const f = document.createElement("input");
+    f.className = "ersatz";
+    f.placeholder = label;
+    f.value = wert;
+    f.addEventListener("change", () => beiAenderung(f.value.trim()));
+    return f;
+  }
+
+  _knopf(zeichen, gesperrt, beiKlick) {
+    const b = document.createElement("button");
+    b.className = "knopf";
+    b.type = "button";
+    b.textContent = zeichen;
+    b.disabled = !!gesperrt;
+    b.addEventListener("click", beiKlick);
+    return b;
+  }
+
+  _aendere(index, eintrag) {
+    const entities = [...this._config.entities];
+    if (eintrag === null) entities.splice(index, 1);
+    else entities[index] = eintrag;
+    this._melde({ ...this._config, entities });
+  }
+
+  _verschiebe(index, richtung) {
+    const ziel = index + richtung;
+    const entities = [...this._config.entities];
+    if (ziel < 0 || ziel >= entities.length) return;
+    [entities[index], entities[ziel]] = [entities[ziel], entities[index]];
+    this._melde({ ...this._config, entities });
+  }
+
+  /* ---------- Schema und Formular ---------- */
 
   _schema() {
     const graph = this._config.footer.graph || "none";
@@ -831,170 +1129,7 @@ class EntitiesBackgroundCardEditor extends HTMLElement {
     this._melde(neu);
   }
 
-  /* ---------- Entitaetsliste ---------- */
-
-  _rendere() {
-    if (!this._config || !this._hass) return;
-    if (!this._aufgebaut) this._baueGeruest();
-
-    this._elForm.hass = this._hass;
-    this._elForm.schema = this._schema();
-    this._elForm.data = this._formularDaten();
-
-    const mitGraph = (this._config.footer.graph || "none") !== "none";
-    this._elHinweis.textContent = mitGraph
-      ? "Jede Zeile trägt die Farbe ihrer Linie — deshalb braucht die Karte keine Legende."
-      : "Ohne Graph bleiben die Zeilen im Theme-Stil; eine Farbe würde dort nichts erklären.";
-
-    this._elListe.innerHTML = "";
-    this._config.entities.forEach((e, i) => this._elListe.appendChild(this._baueEintrag(e, i)));
-
-    this._elHinzu.innerHTML = "";
-    this._elHinzu.appendChild(this._entitaetsWaehler("", (wert) => {
-      if (!wert) return;
-      const entities = [...this._config.entities, {
-        entity: wert,
-        color: PALETTE[this._config.entities.length % PALETTE.length],
-      }];
-      this._melde({ ...this._config, entities });
-    }));
-  }
-
-  _baueEintrag(e, index) {
-    const box = document.createElement("div");
-    box.className = "eintrag";
-
-    // Kopfzeile: Entitaet plus Reihenfolge und Loeschen
-    const kopf = document.createElement("div");
-    kopf.className = "kopf";
-    kopf.appendChild(this._entitaetsWaehler(e.entity, (wert) => {
-      if (!wert) return this._aendere(index, null);
-      this._aendere(index, { ...e, entity: wert });
-    }));
-    kopf.appendChild(this._knopf("▲", index === 0, () => this._verschiebe(index, -1)));
-    kopf.appendChild(this._knopf("▼", index === this._config.entities.length - 1, () => this._verschiebe(index, 1)));
-    kopf.appendChild(this._knopf("✕", false, () => this._aendere(index, null)));
-    box.appendChild(kopf);
-
-    // Detailzeile: Name, Sekundaerinfo, Farbe
-    const detail = document.createElement("div");
-    detail.className = "detail";
-
-    detail.appendChild(this._textfeld("Name (optional)", e.name || "", (wert) => {
-      const neu = { ...e };
-      if (wert) neu.name = wert; else delete neu.name;
-      this._aendere(index, neu);
-    }));
-
-    const auswahl = document.createElement("select");
-    ZUSATZ_OPTIONEN.forEach((o) => {
-      const opt = document.createElement("option");
-      opt.value = o.value;
-      opt.textContent = o.label;
-      if ((e.secondary_info || "") === o.value) opt.selected = true;
-      auswahl.appendChild(opt);
-    });
-    auswahl.title = "Zweite Zeile unter dem Namen";
-    auswahl.addEventListener("change", () => {
-      const neu = { ...e };
-      if (auswahl.value) neu.secondary_info = auswahl.value; else delete neu.secondary_info;
-      this._aendere(index, neu);
-    });
-    detail.appendChild(auswahl);
-
-    const farbe = document.createElement("div");
-    farbe.className = "farbe";
-    const label = document.createElement("label");
-    label.textContent = "Farbe";
-    const picker = document.createElement("input");
-    picker.type = "color";
-    picker.value = e.color || PALETTE[index % PALETTE.length];
-    picker.addEventListener("change", () => this._aendere(index, { ...e, color: picker.value }));
-    farbe.appendChild(label);
-    farbe.appendChild(picker);
-    detail.appendChild(farbe);
-
-    box.appendChild(detail);
-    return box;
-  }
-
-  /** ha-entity-picker, wenn das Frontend ihn hergibt — sonst ein Feld mit Vorschlagsliste. */
-  _entitaetsWaehler(wert, beiAenderung) {
-    if (customElements.get("ha-entity-picker")) {
-      const p = document.createElement("ha-entity-picker");
-      p.hass = this._hass;
-      p.value = wert;
-      p.allowCustomEntity = true;
-      p.addEventListener("value-changed", (ev) => {
-        ev.stopPropagation();
-        beiAenderung(ev.detail.value);
-      });
-      return p;
-    }
-
-    const feld = document.createElement("input");
-    feld.className = "ersatz";
-    feld.value = wert;
-    feld.placeholder = "sensor.beispiel";
-    const liste = document.createElement("datalist");
-    liste.id = `ebg-liste-${Math.random().toString(36).slice(2)}`;
-    Object.keys(this._hass.states).slice(0, 2000).forEach((id) => {
-      const o = document.createElement("option");
-      o.value = id;
-      liste.appendChild(o);
-    });
-    feld.setAttribute("list", liste.id);
-    feld.addEventListener("change", () => beiAenderung(feld.value.trim()));
-
-    const huelle = document.createElement("span");
-    huelle.style.display = "contents";
-    huelle.appendChild(feld);
-    huelle.appendChild(liste);
-    return huelle;
-  }
-
-  _textfeld(label, wert, beiAenderung) {
-    if (customElements.get("ha-textfield")) {
-      const f = document.createElement("ha-textfield");
-      f.label = label;
-      f.value = wert;
-      f.addEventListener("change", () => beiAenderung(f.value.trim()));
-      return f;
-    }
-    const f = document.createElement("input");
-    f.className = "ersatz";
-    f.placeholder = label;
-    f.value = wert;
-    f.addEventListener("change", () => beiAenderung(f.value.trim()));
-    return f;
-  }
-
-  _knopf(zeichen, gesperrt, beiKlick) {
-    const b = document.createElement("button");
-    b.className = "knopf";
-    b.type = "button";
-    b.textContent = zeichen;
-    b.disabled = !!gesperrt;
-    b.addEventListener("click", beiKlick);
-    return b;
-  }
-
-  _aendere(index, eintrag) {
-    const entities = [...this._config.entities];
-    if (eintrag === null) entities.splice(index, 1);
-    else entities[index] = eintrag;
-    this._melde({ ...this._config, entities });
-  }
-
-  _verschiebe(index, richtung) {
-    const ziel = index + richtung;
-    const entities = [...this._config.entities];
-    if (ziel < 0 || ziel >= entities.length) return;
-    [entities[index], entities[ziel]] = [entities[ziel], entities[index]];
-    this._melde({ ...this._config, entities });
-  }
-
-  _melde(config) {
+  _aufraeumen(config) {
     const sauber = { ...config };
     delete sauber.footer;
     if (config.footer && Object.keys(config.footer).length) {
@@ -1002,6 +1137,15 @@ class EntitiesBackgroundCardEditor extends HTMLElement {
       if (f.graph === "none") delete f.graph;
       if (Object.keys(f).length) sauber.footer = f;
     }
+    return sauber;
+  }
+
+  _melde(config) {
+    const sauber = this._aufraeumen(config);
+    this._config = this._normalisiere(sauber);
+    // Vor dem Senden merken: Home Assistant ruft setConfig unter Umstaenden synchron auf.
+    this._eigeneMeldung = JSON.stringify(this._config);
+    this._aktualisiere();
     this.dispatchEvent(new CustomEvent("config-changed", {
       detail: { config: sauber },
       bubbles: true,
