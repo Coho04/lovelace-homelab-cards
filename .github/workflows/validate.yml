@@ -7,13 +7,23 @@ on:
     - cron: "0 4 * * 1"
   workflow_dispatch:
 
+# Der Workflow liest nur den Quelltext. Ohne diese Angabe bekaeme der
+# GITHUB_TOKEN die Standardrechte des Repos - mehr, als eine Validierung braucht,
+# und das in einem Schritt, der fremden Code ausfuehrt.
+permissions:
+  contents: read
+
 jobs:
   hacs:
     name: HACS
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: hacs/action@main
+        with:
+          persist-credentials: false
+      # Auf einen Commit festgenagelt statt auf @main: ein beweglicher Zweig einer
+      # fremden Action wuerde hier sonst ungeprueft neuen Code ausfuehren.
+      - uses: hacs/action@1ebf01c408f29afcb6406bd431bc98fd8cbb15aa # main, Stand 2026-10-12
         with:
           category: plugin
           # "images" verlangt ein Bildschirmfoto im README. Das ist nur fuer die
