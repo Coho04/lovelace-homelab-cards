@@ -23,8 +23,10 @@
  *   title: Temperaturen            # optional
  *   hours: 24                      # Zeitraum des Verlaufs
  *   footer:
- *     graph: card                  # card | rows | full | none
+ *     graph: card                  # card | rows | inline | full | none
  *     height: 100                  # Hoehe des Graphbands, nur bei graph: card
+ *     spark_width: 60              # Breite des Zeilen-Graphen, nur bei graph: inline
+ *     spark_height: 24             # Hoehe des Zeilen-Graphen, nur bei graph: inline
  *     image: /local/bild.jpg       # optional, auch zusammen mit graph
  *     image_height: 120            # optional, sonst Originalverhaeltnis
  *   entities:
@@ -39,7 +41,7 @@
  * buckets (48 Punkte je Linie), scale (unit | each), refresh (Minuten).
  */
 
-const VERSION = "1.2.1";
+const VERSION = "1.3.0";
 
 const PALETTE = [
   "#ff7043", "#29b6f6", "#90a4ae", "#ef5350",
@@ -49,7 +51,7 @@ const PALETTE = [
 
 const W = 1000;          // SVG-Koordinatenraum, per preserveAspectRatio gedehnt
 const H = 300;
-const GRAPH_MODI = ["card", "rows", "full", "none"];
+const GRAPH_MODI = ["card", "rows", "inline", "full", "none"];
 const FARB_ZIELE = ["icon", "name", "dot"];
 
 const STANDARD = {
@@ -136,7 +138,7 @@ class EntitiesBackgroundCard extends HTMLElement {
       ...STANDARD,
       ...config,
       color_targets: ziele,
-      footer: { height: 100, ...footer, graph },
+      footer: { height: 100, spark_width: 60, spark_height: 24, ...footer, graph },
       entities: config.entities.map((e, i) => {
         const roh = typeof e === "string" ? { entity: e } : e;
         if (!roh.entity) throw new Error("Jeder Eintrag braucht ein 'entity'.");
@@ -213,6 +215,8 @@ class EntitiesBackgroundCard extends HTMLElement {
           flex: 0 0 auto; width: 8px; height: 8px;
           border-radius: 50%; margin-left: 8px;
         }
+        .spark { flex: 0 0 auto; margin-left: 8px; }
+        .spark svg { width: 100%; height: 100%; display: block; }
         .wert {
           flex: 0 0 auto; margin-left: 8px; text-align: right;
           font-size: 14px; color: var(--primary-text-color); white-space: nowrap;
@@ -306,6 +310,15 @@ class EntitiesBackgroundCard extends HTMLElement {
     text.appendChild(name);
     text.appendChild(zusatz);
     inhalt.appendChild(text);
+
+    // Platz fuer den Zeilen-Graphen — zwischen Name und Wert, wie gewuenscht.
+    if (this._config.footer.graph === "inline") {
+      const spark = document.createElement("div");
+      spark.className = "spark";
+      spark.style.width = `${this._config.footer.spark_width}px`;
+      spark.style.height = `${this._config.footer.spark_height}px`;
+      inhalt.appendChild(spark);
+    }
 
     if (e.color && ziele.includes("dot")) {
       const punkt = document.createElement("span");
@@ -478,10 +491,24 @@ class EntitiesBackgroundCard extends HTMLElement {
     Array.from(this._elZeilen.children).forEach((z) => {
       const g = z.querySelector(".zeile-graph");
       if (g) g.innerHTML = "";
+      const s = z.querySelector(".spark");
+      if (s) s.innerHTML = "";
     });
 
     if (modus === "none" || !this._verlauf) return;
     const reihen = this._reihen();
+
+    if (modus === "inline") {
+      // Kleiner Verlauf in der Zeile, jeder mit eigener Skala.
+      reihen.forEach((r, i) => {
+        const zeile = this._elZeilen.children[i];
+        if (!zeile) return;
+        const ziel = zeile.querySelector(".spark");
+        if (!ziel || r.punkte.length < 2) return;
+        ziel.innerHTML = this._svg([this._pfad(r, this._skala([r]))], `s${i}`);
+      });
+      return;
+    }
 
     if (modus === "rows") {
       // Jede Zeile bekommt ihren eigenen Verlauf hinter sich, mit eigener Skala.
@@ -594,6 +621,8 @@ const BESCHRIFTUNG = {
   hours: "Zeitraum",
   graph: "Graph",
   height: "Höhe des Graphbands",
+  spark_width: "Breite des Zeilen-Graphen",
+  spark_height: "Höhe des Zeilen-Graphen",
   image: "Bild im Footer",
   image_height: "Bildhöhe",
   color_targets: "Was wird eingefärbt",
@@ -1011,6 +1040,7 @@ class EntitiesBackgroundCardEditor extends HTMLElement {
               { value: "none", label: "Kein Graph" },
               { value: "card", label: "Band am Kartenfuß" },
               { value: "rows", label: "Hinter jeder Zeile" },
+              { value: "inline", label: "Klein in der Zeile, zwischen Name und Wert" },
               { value: "full", label: "Hinter der ganzen Karte" },
             ],
           },
@@ -1042,6 +1072,17 @@ class EntitiesBackgroundCardEditor extends HTMLElement {
       felder.push({
         name: "height",
         selector: { number: { min: 40, max: 400, mode: "box", unit_of_measurement: "px" } },
+      });
+    }
+
+    if (graph === "inline") {
+      felder.push({
+        name: "spark_width",
+        selector: { number: { min: 20, max: 200, mode: "box", unit_of_measurement: "px" } },
+      });
+      felder.push({
+        name: "spark_height",
+        selector: { number: { min: 12, max: 80, mode: "box", unit_of_measurement: "px" } },
       });
     }
 
@@ -1091,6 +1132,8 @@ class EntitiesBackgroundCardEditor extends HTMLElement {
       graph: f.graph || "none",
       hours: c.hours ?? STANDARD.hours,
       height: f.height ?? 100,
+      spark_width: f.spark_width ?? 60,
+      spark_height: f.spark_height ?? 24,
       image: f.image || "",
       image_height: f.image_height,
       color_targets: c.color_targets ?? STANDARD.color_targets,
@@ -1111,6 +1154,10 @@ class EntitiesBackgroundCardEditor extends HTMLElement {
     const footer = {};
     if (daten.graph && daten.graph !== "none") footer.graph = daten.graph;
     if (daten.graph === "card" && daten.height && daten.height !== 100) footer.height = daten.height;
+    if (daten.graph === "inline") {
+      if (daten.spark_width && daten.spark_width !== 60) footer.spark_width = daten.spark_width;
+      if (daten.spark_height && daten.spark_height !== 24) footer.spark_height = daten.spark_height;
+    }
     if (daten.image) footer.image = daten.image;
     if (daten.image && daten.image_height) footer.image_height = daten.image_height;
     if (Object.keys(footer).length) neu.footer = footer;

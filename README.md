@@ -60,6 +60,7 @@ entities:
 |---|---|
 | `card` | ein gemeinsames Band am Kartenfuß, alle Linien überlagert |
 | `rows` | jede Zeile bekommt ihren eigenen Verlauf dahinter, mit eigener Skala |
+| `inline` | kleiner Verlauf **in** der Zeile, zwischen Name und Wert, mit eigener Skala |
 | `full` | ein Graph hinter der ganzen Karte, die Liste liegt darüber |
 | `none` | kein Graph (Standard) |
 
@@ -73,6 +74,8 @@ entities:
 | `footer.graph` | `none` | siehe Tabelle oben |
 | `color_targets` | `[icon, name]` | was die Farbe einfärbt: beliebige Kombination aus `icon`, `name` und `dot` (farbiger Punkt vor dem Wert). Leere Liste = gar nichts |
 | `footer.height` | `100` | Höhe des Graphbands in Pixeln, nur bei `graph: card` |
+| `footer.spark_width` | `60` | Breite des Zeilen-Graphen in Pixeln, nur bei `graph: inline` |
+| `footer.spark_height` | `24` | Höhe des Zeilen-Graphen in Pixeln, nur bei `graph: inline` |
 | `footer.image` | – | Bild im Footer, z. B. `/local/grundriss.png`. Auch zusammen mit einem Graphen |
 | `footer.image_height` | – | Bildhöhe in Pixeln; ohne Angabe bleibt das Originalverhältnis |
 | `scale` | `unit` | `unit` = gleiche Einheit teilt sich eine Skala, `each` = jede Linie nutzt die volle Höhe |
